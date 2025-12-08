@@ -1,0 +1,8 @@
+flask
+boto3
+psycopg2-binary
+opencv-python
+numpy
+Pillow
+matplotlib
+python-dotenv

@@ -1,0 +1,14 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Football MVP Upload</title>
+  </head>
+  <body>
+    <h1>Upload Match Video</h1>
+    <form action="/upload" method="post" enctype="multipart/form-data">
+      <input type="text" name="match_name" placeholder="Match name" required><br><br>
+      <input type="file" name="video" accept="video/*" required><br><br>
+      <button type="submit">Upload &amp; Process</button>
+    </form>
+  </body>
+</html>
