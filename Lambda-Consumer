@@ -1,0 +1,164 @@
+import os
+import json
+import base64
+import uuid
+from io import BytesIO
+
+import boto3
+import psycopg2
+import numpy as np
+import cv2
+
+# ========= ENV CONFIG =========
+AWS_REGION = os.getenv("AWS_REGION", "eu-central-1")
+DEST_BUCKET = os.getenv("DEST_BUCKET", "football-mvp-storage")  # processed images bucket
+DB_URL = os.getenv("DB_URL")
+
+KINESIS_STREAM_NAME = os.getenv("KINESIS_STREAM_NAME", "kinesis_sportsvid_datastream")
+
+s3_client = boto3.client("s3", region_name=AWS_REGION)
+
+
+# ========= DB CONNECTION SETUP =========
+# For Lambdas, it's common to create a global connection and reuse it across invocations.
+db_conn = None
+
+
+def get_db_conn():
+    global db_conn
+    if db_conn is None or db_conn.closed != 0:
+        db_conn = psycopg2.connect(DB_URL)
+    return db_conn
+
+
+def insert_detection(match_id, frame_id, cls, score, x1, y1, x2, y2):
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO detections (match_id, frame_id, class, score, x1, y1, x2, y2)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        """,
+        (match_id, frame_id, cls, score, x1, y1, x2, y2),
+    )
+    conn.commit()
+    cur.close()
+
+
+# ========= SAM3 STUB =========
+def run_sam3(frame: np.ndarray):
+    """
+    Replace this stub with your real SAM3 inference.
+    Should return a list of detections like:
+    [
+        {
+            "class": "player",
+            "score": 0.93,
+            "box": [x1, y1, x2, y2],
+        },
+        ...
+    ]
+    """
+    h, w, _ = frame.shape
+    return [
+        {
+            "class": "player",
+            "score": 0.9,
+            "box": [w * 0.4, h * 0.3, w * 0.6, h * 0.8],
+        }
+    ]
+
+
+# ========= IMAGE UPLOAD HELPER =========
+def save_annotated_frame_to_s3(frame: np.ndarray, match_id: str, frame_id: int) -> str:
+    """
+    Draws bounding boxes (if you want) and uploads the frame to S3 under:
+    processed/<match_id>/frame_<frame_id>.jpg
+
+    Returns the S3 key.
+    """
+    # Encode as JPEG
+    success, jpeg = cv2.imencode(".jpg", frame)
+    if not success:
+        raise RuntimeError("Could not encode frame to JPEG")
+
+    key = f"processed/{match_id}/frame_{frame_id:06d}.jpg"
+
+    s3_client.put_object(
+        Bucket=DEST_BUCKET,
+        Key=key,
+        Body=jpeg.tobytes(),
+        ContentType="image/jpeg",
+    )
+
+    return key
+
+
+def draw_boxes(frame: np.ndarray, detections):
+    """
+    Draws bounding boxes + class labels onto the frame (for visualization).
+    You can customize colors per class.
+    """
+    for det in detections:
+        x1, y1, x2, y2 = map(int, det["box"])
+        cls = det["class"]
+        score = det["score"]
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        label = f"{cls} {score:.2f}"
+        cv2.putText(frame, label, (x1, max(0, y1 - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+    return frame
+
+
+# ========= LAMBDA HANDLER =========
+def handler(event, context):
+    """
+    AWS Lambda handler for Kinesis trigger.
+
+    event["Records"] contains Kinesis records.
+    Each record["kinesis"]["data"] is base64-encoded.
+    """
+    # Debug: number of records
+    print(f"Received {len(event.get('Records', []))} records")
+
+    for record in event.get("Records", []):
+        try:
+            kinesis_data = record["kinesis"]["data"]
+            payload_bytes = base64.b64decode(kinesis_data)
+            payload = json.loads(payload_bytes)
+
+            match_id = payload["match_id"]
+            frame_id = payload["frame_id"]
+            frame_b64 = payload["image_jpg_b64"]
+
+            # Decode JPEG frame
+            jpeg_bytes = base64.b64decode(frame_b64)
+            np_arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+            if frame is None:
+                print(f"Failed to decode frame {frame_id} for match {match_id}")
+                continue
+
+            # Run SAM3 detections
+            detections = run_sam3(frame)
+
+            # Store detections in Postgres
+            for det in detections:
+                cls = det["class"]
+                score = det["score"]
+                x1, y1, x2, y2 = det["box"]
+                insert_detection(match_id, frame_id, cls, score, x1, y1, x2, y2)
+
+            # Draw boxes for visualization & upload annotated frame to S3
+            annotated = draw_boxes(frame.copy(), detections)
+            img_key = save_annotated_frame_to_s3(annotated, match_id, frame_id)
+
+            print(f"Processed frame {frame_id} for match {match_id}, saved {img_key}")
+
+        except Exception as e:
+            print(f"Error processing record: {e}")
+
+    return {"statusCode": 200, "body": "Batch processed"}

@@ -1,0 +1,171 @@
+import os
+import json
+import time
+import base64
+
+import boto3
+import numpy as np
+import cv2
+import psycopg2
+
+# ========= ENV CONFIG =========
+AWS_REGION = os.getenv("AWS_REGION", "eu-central-1")
+KINESIS_STREAM_NAME = os.getenv("KINESIS_STREAM_NAME", "kinesis_sportsvid_datastream")
+DEST_BUCKET = os.getenv("DEST_BUCKET", "football-mvp-storage")  # where to store processed frames
+DB_URL = os.getenv("DB_URL")  # cloud-accessible Postgres
+
+# AWS clients (use EC2 IAM role instead of access keys if possible)
+kinesis = boto3.client("kinesis", region_name=AWS_REGION)
+s3 = boto3.client("s3", region_name=AWS_REGION)
+
+# ========= DB CONNECTION HELPERS =========
+_db_conn = None
+
+def get_db_conn():
+    global _db_conn
+    if _db_conn is None or _db_conn.closed != 0:
+        _db_conn = psycopg2.connect(DB_URL)
+    return _db_conn
+
+
+def insert_detection(match_id, frame_id, cls, score, x1, y1, x2, y2):
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO detections
+        (match_id, frame_id, class, score, x1, y1, x2, y2)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        """,
+        (match_id, frame_id, cls, score, x1, y1, x2, y2),
+    )
+    conn.commit()
+    cur.close()
+
+
+# ========= SAM3 MODEL (TODO: plug in your real code) =========
+
+# Example structure – adapt to your real SAM3 setup.
+# from sam3.model_builder import build_sam3_image_model
+# from sam3.model.sam3_image_processor import Sam3Processor
+# import torch
+#
+# DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# model = build_sam3_image_model()
+# model.to(DEVICE).eval()
+# processor = Sam3Processor(model)
+
+def run_sam3(frame: np.ndarray):
+    """
+    TODO: Replace this stub with your real SAM3 inference.
+    Should return a list of detections like:
+    [
+        {"class": "player", "score": 0.93, "box": [x1, y1, x2, y2]},
+        ...
+    ]
+    """
+    h, w, _ = frame.shape
+    return [
+        {
+            "class": "player",
+            "score": 0.9,
+            "box": [w * 0.4, h * 0.3, w * 0.6, h * 0.8],
+        }
+    ]
+
+
+# ========= VIS + S3 SAVE =========
+
+def draw_boxes(frame: np.ndarray, detections):
+    for det in detections:
+        x1, y1, x2, y2 = map(int, det["box"])
+        cls = det["class"]
+        score = det["score"]
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        label = f"{cls} {score:.2f}"
+        cv2.putText(frame, label, (x1, max(0, y1 - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    return frame
+
+
+def save_frame_to_s3(frame: np.ndarray, match_id: str, frame_id: int) -> str:
+    ok, jpeg = cv2.imencode(".jpg", frame)
+    if not ok:
+        raise RuntimeError("JPEG encoding failed")
+
+    key = f"processed/{match_id}/frame_{frame_id:06d}.jpg"
+    s3.put_object(
+        Bucket=DEST_BUCKET,
+        Key=key,
+        Body=jpeg.tobytes(),
+        ContentType="image/jpeg",
+    )
+    return key
+
+
+# ========= KINESIS CONSUMER LOOP =========
+
+def main():
+    # Get first shard
+    shards_resp = kinesis.list_shards(StreamName=KINESIS_STREAM_NAME)
+    shards = shards_resp.get("Shards", [])
+    if not shards:
+        print("No shards found on stream", KINESIS_STREAM_NAME)
+        return
+
+    shard_id = shards[0]["ShardId"]
+    print("Using shard:", shard_id)
+
+    it_resp = kinesis.get_shard_iterator(
+        StreamName=KINESIS_STREAM_NAME,
+        ShardId=shard_id,
+        ShardIteratorType="TRIM_HORIZON",  # or 'LATEST'
+    )
+    shard_it = it_resp["ShardIterator"]
+
+    print("Starting EC2 GPU consumer loop...")
+    while True:
+        resp = kinesis.get_records(ShardIterator=shard_it, Limit=25)
+        shard_it = resp["NextShardIterator"]
+        records = resp["Records"]
+
+        for r in records:
+            try:
+                payload = json.loads(r["Data"])
+                match_id = payload["match_id"]
+                frame_id = payload["frame_id"]
+                frame_b64 = payload["image_jpg_b64"]
+
+                jpeg_bytes = base64.b64decode(frame_b64)
+                np_arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+                frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+                if frame is None:
+                    print(f"[WARN] Failed to decode frame {frame_id} for match {match_id}")
+                    continue
+
+                # Run SAM3
+                detections = run_sam3(frame)
+
+                # Store detections to DB
+                for det in detections:
+                    cls = det["class"]
+                    score = det["score"]
+                    x1, y1, x2, y2 = det["box"]
+                    insert_detection(match_id, frame_id, cls, score, x1, y1, x2, y2)
+
+                # Save annotated frame to S3
+                annotated = draw_boxes(frame.copy(), detections)
+                key = save_frame_to_s3(annotated, match_id, frame_id)
+
+                print(f"[OK] frame={frame_id} match={match_id} saved={key} detections={len(detections)}")
+
+            except Exception as e:
+                print(f"[ERROR] processing record: {e}")
+
+        time.sleep(0.2)
+
+
+if __name__ == "__main__":
+    main()
