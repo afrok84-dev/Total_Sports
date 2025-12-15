@@ -7,8 +7,9 @@ from analytics.court_homography import CourtHomography
 from analytics.ball_physics import BallPhysics
 
 
-VIDEO_PATH = "input/input_video.mp4"      # <--- your tennis video here
-MODEL_PATH = "models/tennis_yolov5.pt"
+VIDEO_PATH = r"input/input_video.mp4"      # <--- your tennis video here
+# MODEL_PATH = r"models/tennis_yolov5.pt"
+MODEL_PATH = r"C:\Users\User\Desktop\tennis_afro_gabi_project\Total_Sports\tennis_tracking_project\models\tennis_yolov5.pt"
 
 
 
@@ -29,8 +30,9 @@ def main():
                       (int(cap.get(3)), int(cap.get(4))))
 
 
-
+    frame_idx = 0
     while True:
+        frame_idx += 1
         ret, frame = cap.read()
         if not ret:
             break
@@ -46,7 +48,7 @@ def main():
         # ----------------------------------
         # 2. Player Tracking (DeepSORT)
         # ----------------------------------
-        player_tracks = player_tracker.update(player_dets, frame)
+        player_tracks = player_tracker.update(player_dets, frame, frame_idx)
 
         # ----------------------------------
         # 3. Ball Tracking + Kalman smoothing

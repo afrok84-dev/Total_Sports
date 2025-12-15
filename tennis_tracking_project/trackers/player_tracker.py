@@ -4,10 +4,11 @@ class PlayerTracker:
     def __init__(self):
         self.tracker = DeepSort(max_age=5)
 
-    def update(self, detections, frame):
+    def update(self, detections, frame, frame_idx):
         track_inputs = []
 
         for d in detections:
+            print(f"{frame_idx}: DETECTION :{d}")
             # xyxy → xywh
             x1, y1, x2, y2 = [float(v) for v in d["bbox"]]
             w, h = x2 - x1, y2 - y1
