@@ -1,49 +1,85 @@
-
-
 import cv2
 import numpy as np
+from collections import deque
 
-from services.frame_estimator_service import FrameEstimatorService
+from Total_Sports.tennis_2D_transformation.services.frame_estimator_service import FrameEstimatorService, perspective_map_point
+
 
 
 class TennisBall:
-    def __init__(self, detection_mask: np.ndarray | None = None):
-        self.detection_mask = detection_mask
+    def __init__(self, mask: np.ndarray | None = None, speed_window=10):
+        self.mask = mask
         self.ball_position = None  # (x, y) in image coordinates
+        self.ball_positions_history = []
+        self._world_hist = deque(maxlen=speed_window)  # (t, x, y)
+        self._speed = 0.0
         
-    def get_ball_position_in_relation_to_court(self) -> tuple[float, float]:
-        # method to get ball position relative to court dimensions
-        raise NotImplementedError("This method should be implemented by subclasses.")
+    def update_ball_mask(self, mask: np.ndarray, t: float, H_img_to_world: np.ndarray):
+        self.mask = mask
+        self.ball_position = self._centroid_from_pixels(mask)
+        self.ball_positions_history.append(self.ball_position)
+        if self.ball_position is None:
+            return
+
+        u, v = self.ball_position
+        x, y = perspective_map_point(u, v, H_img_to_world)
+        self._world_hist.append((t, float(x), float(y)))
+
+        if len(self._world_hist) >= 2:
+            t1, x1, y1 = self._world_hist[-2]
+            t2, x2, y2 = self._world_hist[-1]
+            dt = (t2 - t1)
+            if dt > 1e-6:
+                self._speed = float(np.hypot(x2 - x1, y2 - y1) / dt)
+
+    def _centroid_from_mask(self, mask: np.ndarray | None):
+        if mask is None:
+            return None
+        if mask.dtype != np.uint8:
+            mask = mask.astype(np.uint8)
+        if mask.max() == 1:
+            mask = mask * 255
+
+        ys, xs = np.where(mask > 0)
+        if len(xs) == 0:
+            return None
+
+        # centroid
+        u = float(xs.mean())
+        v = float(ys.mean())
+        return (u, v)
+
+    def _centroid_from_pixels(self, pixels_xy: np.ndarray):
+        return float(pixels_xy[:,0].mean()), float(pixels_xy[:,1].mean())
+
+    def get_ball_position_in_relation_to_court(self, H_img_to_world: np.ndarray, court_bounds) -> tuple[float, float] | None:
+        pos = self.get_ball_coordinates_in_real_world(H_img_to_world)
+        if pos is None:
+            return None
+        x, y, _ = pos
+        xmin, xmax, ymin, ymax = court_bounds
+        rx = (x - xmin) / (xmax - xmin + 1e-9)
+        ry = (y - ymin) / (ymax - ymin + 1e-9)
+        return float(rx), float(ry)
     
     def get_ball_position_in_relation_to_players(self, player_positions: list[tuple[float, float]]) -> list[float]:
         # method to get ball position relative to player positions
         raise NotImplementedError("This method should be implemented by subclasses.")
     
-    def get_ball_coordinates_in_frame(self, H_img_to_world) -> tuple[float, float]:
-        fps = int(214/7) # 214 frames over 7 seconds
-        estimator_service = FrameEstimatorService(H_img_to_world, window=5)
-
-        for i, mask_text in enumerate(masks_as_text):
-            t = i / fps
-
-            pts = parse_sam_points(mask_text)
-            res = sam_mask_to_center(pts)  # (u,v,score) or None
-
-            if res is not None:
-                u, v, score = res
-                estimator_service.add_observation_uv(u, v, t=t, score=score)
-
-            xy_hat = estimator_service.estimate(t_query=t)
-            print(i, "ball topdown (x,y):", xy_hat)
-        raise NotImplementedError("This method should be implemented by subclasses.")
+    def get_ball_coordinates_in_frame(self) -> tuple[float, float] | None:
+        return self.ball_position
     
-    def get_ball_coordinates_in_real_world(self) -> tuple[float, float, float]:
-        # method to get ball coordinates in real-world 3D space
-        raise NotImplementedError("This method should be implemented by subclasses.")
+    def get_ball_coordinates_in_real_world(self, H_img_to_world) -> tuple[float, float, float] | None:
+        if self.ball_position is None:
+            return None
+        u, v = self.ball_position
+        x, y = perspective_map_point(u, v, H_img_to_world)
+        # You don't have z yet → return 0.0 for now or None
+        return float(x), float(y), 0.0
     
     @property
     def ball_speed(self) -> float:
-        raise NotImplementedError("This method should be implemented by subclasses.")
+        return self._speed
     
     @property
     def is_ball_in_play(self) -> bool:

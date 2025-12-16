@@ -1,12 +1,13 @@
 import numpy as np
-from tennis_objects.ball import TennisBall
-from tennis_objects.court import TennisCourt
-from input_masks.ball_detection_mask import tennis_ball
-from input_masks.player1_detection_mask import tennis_player_1
-from input_masks.player2_detection_mask import tennis_player_2
-from input_masks.player3_detection_mask import tennis_player_3
-from input_masks.player4_detection_mask import tennis_player_4
-from input_masks.court_detection_mask import tennis_court
+from Total_Sports.tennis_2D_transformation.tennis_objects.ball import TennisBall
+from Total_Sports.tennis_2D_transformation.tennis_objects.court import TennisCourt
+from Total_Sports.tennis_2D_transformation.input_masks.ball_detection_mask import tennis_ball
+from Total_Sports.tennis_2D_transformation.input_masks.player1_detection_mask import tennis_player_1
+from Total_Sports.tennis_2D_transformation.input_masks.player2_detection_mask import tennis_player_2
+from Total_Sports.tennis_2D_transformation.input_masks.player3_detection_mask import tennis_player_3
+from Total_Sports.tennis_2D_transformation.input_masks.player4_detection_mask import tennis_player_4
+from Total_Sports.tennis_2D_transformation.input_masks.court_detection_mask import tennis_court
+from Total_Sports.tennis_2D_transformation.utils.ball_missing_frames_filler import fill_gaps_linear_max_gap
 
 
 class GeneralEnvironment:
@@ -23,14 +24,6 @@ class GeneralEnvironment:
         self.ball_object = TennisBall()
         self.tennis_players_object = None # skip for now
 
-    def get_court_mask(self) -> np.ndarray:
-        # method that should consume court detection mask. Hardcoded for now.
-        return np.fromstring(tennis_court.replace('[','').replace(']',''), sep=' ').reshape(-1, 2)
-
-    def get_ball_mask(self) -> np.ndarray:
-        # method that should consume ball detection mask. Hardcoded for now.
-        return np.fromstring(tennis_ball.replace('[','').replace(']',''), sep=' ').reshape(-1, 2)
-
     def get_player_masks(self) -> list[np.ndarray]:
         # method that should consume player detection masks. Hardcoded for now.
         player1_points = np.fromstring(tennis_player_1.replace('[','').replace(']',''), sep=' ').reshape(-1, 2)
@@ -39,11 +32,21 @@ class GeneralEnvironment:
         player4_points = np.fromstring(tennis_player_4.replace('[','').replace(']',''), sep=' ').reshape(-1, 2)
         return [player1_points, player2_points, player3_points, player4_points]
     
-    def frame_process(self):
+    def frame_process(
+        self,
+        frame_idx: int,
+        updated_court_mask: np.ndarray,
+        updated_ball_mask: np.ndarray,
+        updated_player_masks: list[np.ndarray],
+        missing_ball_frames: bool = False,
+        fps: int = 30,
+    ):
         # this should be called on every frame update
-        court_mask = self.get_court_mask()
-        self.court_object.update_court_mask(court_mask)
+        self.court_object.update_court_mask(updated_court_mask)
         self.court_object.get_corners_from_image()
         homography = self.court_object.get_homography_image_to_world()
-        
-        self.ball_object.detection_mask = self.get_ball_mask()
+        if missing_ball_frames:
+            ball_poss_filled = fill_gaps_linear_max_gap(self.ball_object.ball_positions_history,)
+            self.ball_object.ball_positions_history = ball_poss_filled
+        else:
+            self.ball_object.update_ball_mask(updated_ball_mask, frame_idx / fps, homography)

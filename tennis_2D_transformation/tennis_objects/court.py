@@ -3,7 +3,8 @@
 import cv2
 import numpy as np
 
-from services.court_corners_service import CourtCornersService
+from Total_Sports.tennis_2D_transformation.services.court_corners_service import CourtCornersService
+
 
 
 class TennisCourt:
