@@ -2,7 +2,7 @@
 import cv2
 import numpy as np
 
-class CourtHomography:
+class Homography:
     def __init__(self):
         self.H = None
 

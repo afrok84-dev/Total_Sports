@@ -6,18 +6,30 @@ import base64
 import boto3
 import cv2
 
+import boto3
+import tempfile
+
 from .config import AWS_REGION, KINESIS_STREAM_NAME
 
-
-def send_video_to_kinesis(match_id, video_path, target_fps=5):
-    """
-    Reads a video file, samples frames at target_fps, encodes as JPEG,
-    base64-encodes them, and sends each frame as a record to Kinesis
-    Data Streams.
-    """
+def send_video_to_kinesis(match_id, s3_url, target_fps=5):
     kinesis = boto3.client("kinesis", region_name=AWS_REGION)
+    # Parse S3 URL
+    assert s3_url.startswith("s3://")
+    _, _, bucket, *key_parts = s3_url.split("/")
+    key = "/".join(key_parts)
 
-    cap = cv2.VideoCapture(video_path)
+    # Download the video to temp file
+    s3 = boto3.client("s3")
+    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    local_path = tmp_file.name
+
+    print(f"Downloading from S3: {bucket}/{key}")
+    s3.download_file(bucket, key, local_path)
+
+    print("Downloaded to:", local_path)
+
+    # OpenCV reads the local temp file
+    cap = cv2.VideoCapture(local_path)
     if not cap.isOpened():
         print("Cannot open video:", video_path)
         return

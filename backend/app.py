@@ -2,8 +2,12 @@ from flask import Flask, render_template, request, jsonify
 import os
 import subprocess
 
+
 from .config import UPLOAD_FOLDER
 from .db import insert_match
+
+import boto3
+from .config import S3_BUCKET
 
 app = Flask(__name__)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
@@ -13,26 +17,35 @@ app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 def index():
     return render_template("upload.html")
 
+s3 = boto3.client("s3")
 
 @app.route("/upload", methods=["POST"])
 def upload():
     match_name = request.form.get("match_name", "unnamed_match")
     file = request.files["video"]
 
-    file_path = os.path.join(app.config["UPLOAD_FOLDER"], file.filename)
-    file.save(file_path)
+    # Get filename
+    filename = file.filename  
 
-    # Insert match row in DB
-    match_id = insert_match(match_name, file_path)
-
-    # Start frame producer in background (simple version)
-    # Later, you can replace this with a proper job queue (Celery, RQ, etc.).
-    subprocess.Popen(
-        ["python", "-m", "backend.frame_producer", str(match_id), file_path]
+    # Upload directly to S3
+    s3.upload_fileobj(
+        file,
+        S3_BUCKET,
+        filename,
+        ExtraArgs={"ContentType": file.content_type}
     )
 
-    return jsonify({"status": "started", "match_id": str(match_id)})
+    s3_url = f"s3://{S3_BUCKET}/{filename}"
 
+    # Save match entry with S3 URL
+    match_id = insert_match(match_name, s3_url)
+
+    # Trigger frame producer using S3 URL instead of local file path
+    subprocess.Popen(
+        ["python", "-m", "backend.frame_producer", str(match_id), s3_url]
+    )
+
+    return jsonify({"status": "started", "match_id": str(match_id), "s3_url": s3_url})
 
 if __name__ == "__main__":
     # For local dev only. In production, run via gunicorn/uvicorn.
